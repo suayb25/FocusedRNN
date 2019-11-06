@@ -87,7 +87,9 @@ class SimpleFocusedRNNCell(Layer):
 
     def build(self, input_shape):
         
+        print("input_shape",input_shape)
         self.input_dim = input_shape[-1]
+        print("self.input_dim= ",self.input_dim)
         
         self.input_spec = InputSpec(min_ndim=2, axes={-1: self.input_dim}) #never used for another layer
 
@@ -139,8 +141,10 @@ class SimpleFocusedRNNCell(Layer):
         self.MIN_SI = np.float32(MIN_SI)#, dtype='float32')
         self.MAX_SI = np.float32(MAX_SI)#, dtype='float32')
         
-        w_init_currennt = initializers.get(self.kernel_initializer) if self.kernel_initializer else self.weight_initializer_current
-        w_init_prev = initializers.get(self.kernel_initializer) if self.kernel_initializer else self.weight_initializer_prev
+        w_init_currennt = self.weight_initializer_fw_bg_current
+        w_init_prev =  self.weight_initializer_fw_bg_prev
+        #w_init_currennt = initializers.get(self.kernel_initializer) if self.kernel_initializer else self.weight_initializer_fw_bg_current
+        #w_init_prev = initializers.get(self.kernel_initializer) if self.kernel_initializer else self.weight_initializer_fw_bg_prev
         self.kernel = self.add_weight(shape=(input_shape[-1], self.units),
                                       name='kernel',
                                       initializer=w_init_currennt,
@@ -340,12 +344,58 @@ class SimpleFocusedRNNCell(Layer):
             
         return W
     
-    def weight_initializer_fw_bg(self,shape, dtype='float32'):
+    def weight_initializer_fw_bg_prev(self,shape, dtype='float32'):
         #only implements channel last and HE uniform
-        initer = 'Glorot'
-        distribution = 'uniform'
+        initer = 'He'
+        distribution = 'normal'
+        print("in")
+        kernel = K.eval(self.calc_U_prev())
         
-        kernel = K.eval(self.calc_U())
+        W = np.zeros(shape=shape, dtype=dtype)
+        # for Each Gaussian initialize a new set of weights
+        verbose=self.verbose
+        if verbose:
+            print("Kernel max, mean, min: ", np.max(kernel), np.mean(kernel), np.min(kernel))
+            print("kernel shape:", kernel.shape, ", W shape: ",W.shape)
+        
+        fan_out = self.units
+        sum_over_domain = np.sum(kernel**2,axis=1) # r base
+        sum_over_neuron = np.sum(kernel**2,axis=0)
+        for c in range(W.shape[1]):
+            for r in range(W.shape[0]):
+                fan_out = sum_over_domain[r]
+                fan_in = sum_over_neuron[c]
+                
+                #fan_in *= self.input_channels no need for this in repeated U. 
+                if initer == 'He':
+                    std = self.gain * sqrt32(2.0) / sqrt32(fan_in)
+                else:
+                    std = self.gain * sqrt32(2.0) / sqrt32(fan_in+fan_out)
+                
+                std = np.float32(std)
+                if c == 0 and verbose:
+                    print("Std here: ",std, type(std),W.shape[0],
+                          " fan_in", fan_in, "mx U", np.max(kernel[:,:,:,c]))
+                    print(r,",",c," Fan in ", fan_in, " Fan_out:", fan_out, W[r,c])
+                    
+                if distribution == 'uniform':
+                    std = std * sqrt32(3.0)
+                    std = np.float32(std)
+                    w_vec = np.random.uniform(low=-std, high=std, size=1)
+                elif distribution == 'normal':
+                    std = std/ np.float32(.87962566103423978)           
+                    w_vec = np.random.normal(scale=std, size=1)
+                    
+                W[r,c] = w_vec.astype('float32')
+                
+        return W
+    
+    def weight_initializer_fw_bg_current(self,shape, dtype='float32'):
+        #only implements channel last and HE uniform
+        initer = 'He'
+        distribution = 'normal'
+        
+        kernel = K.eval(self.calc_U_current())
         
         W = np.zeros(shape=shape, dtype=dtype)
         # for Each Gaussian initialize a new set of weights
@@ -492,8 +542,8 @@ class SimpleFocusedRNN(RNN):
     def __init__(self, units,
                  activation='tanh',
                  use_bias=True,
-                 kernel_initializer='glorot_uniform',
-                 recurrent_initializer='orthogonal',
+                 kernel_initializer=None,
+                 recurrent_initializer='orthogonal',#orthogonal
                  bias_initializer='zeros',
                  kernel_regularizer=None,
                  recurrent_regularizer=None,
